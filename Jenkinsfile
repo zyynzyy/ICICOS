@@ -11,7 +11,7 @@ pipeline {
         DORA_LOG = '/var/lib/jenkins/dora-metrics/deployments.csv'
         DORA_WINDOW_DAYS = '30'
 
-        SONAR_PROJECT_KEY = 'zyynzyy_Jenkins-CI-CD-SonarQube'
+        SONAR_PROJECT_KEY = 'zyynzyy_ICICOS'
         SONAR_ORG = 'zyynzyy'
         SONAR_TOKEN = credentials('sonar-token')
 
