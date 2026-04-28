@@ -15,6 +15,13 @@ pipeline {
     }
 
     stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Capture Source Info') {
             steps {
                 script {
@@ -30,62 +37,49 @@ pipeline {
 
         stage('Prepare Workspace') {
             steps {
-                sh '''
-                    rm -rf build semgrep-report.json dora-metrics.json semgrep-status.txt
-                '''
+                sh 'rm -rf build semgrep-report.json dora-metrics.json'
             }
         }
 
-stage('Semgrep Analysis') {
-    steps {
-        script {
-            sh 'test -x "$SEMGREP_BIN"'
+        stage('Semgrep Analysis') {
+            steps {
+                script {
+                    sh 'test -x "$SEMGREP_BIN"'
 
-            def semgrepStatus = sh(
-                returnStdout: true,
-                script: '''
-                    set +e
-                    "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json .
-                    exit_code=$?
+                    def exitCode = sh(
+                        returnStatus: true,
+                        script: '''
+                            "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json .
+                        '''
+                    )
 
-                    if [ $exit_code -eq 0 ]; then
-                        echo OK
-                    elif [ $exit_code -eq 1 ]; then
-                        echo ISSUES
-                    else
-                        echo FAILED
-                    fi
-                '''
-            ).trim()
+                    if (exitCode == 0) {
+                        env.SEMGREP_STATUS = "OK"
+                    } else if (exitCode == 1) {
+                        env.SEMGREP_STATUS = "ISSUES"
+                    } else {
+                        error "Semgrep error (exit code ${exitCode})"
+                    }
 
-            if (semgrepStatus == 'FAILED') {
-                error "Semgrep failed"
+                    archiveArtifacts artifacts: 'semgrep-report.json', fingerprint: true
+                    echo "Semgrep status FIXED: ${env.SEMGREP_STATUS}"
+                }
             }
-
-            env.SEMGREP_STATUS = semgrepStatus
-
-            archiveArtifacts artifacts: 'semgrep-report.json', fingerprint: true
-            echo "Semgrep status: ${env.SEMGREP_STATUS}"
         }
-    }
-}
 
         stage('Build') {
             steps {
                 echo "Build static web"
                 sh '''
-                    set -e
+                    set +e
                     rm -rf build
                     mkdir -p build
 
-                    # copy file-file utama
-                    for f in index.html templates.html templatemo-quantix-style.css templatemo-quantix-script.js; do
-                        if [ -f "$f" ]; then
-                            cp "$f" build/
-                        fi
-                    done
+                    cp index.html build/ 2>/dev/null || true
+                    cp templates.html build/ 2>/dev/null || true
+                    cp templatemo-quantix-style.css build/ 2>/dev/null || true
+                    cp templatemo-quantix-script.js build/ 2>/dev/null || true
 
-                    # kalau ada folder static umum, ikut dicopy juga
                     for d in assets images img css js fonts vendor; do
                         if [ -d "$d" ]; then
                             cp -r "$d" build/
@@ -97,7 +91,6 @@ stage('Semgrep Analysis') {
 
         stage('Deploy to Nginx') {
             steps {
-                echo "Deploy ke Nginx"
                 sh '''
                     mkdir -p "$APP_DIR"
                     rm -rf "$APP_DIR"/*
@@ -109,68 +102,32 @@ stage('Semgrep Analysis') {
         stage('DORA Metrics') {
             steps {
                 script {
-                    def result = sh(
-                        returnStdout: true,
-                        script: '''
-                            set -e
+                    def deployEnd = sh(script: "date +%s", returnStdout: true).trim().toInteger()
+                    def commitTime = env.GIT_COMMIT_EPOCH.toInteger()
 
-                            DEPLOY_EPOCH=$(date +%s)
-                            LT_SECONDS=$((DEPLOY_EPOCH - GIT_COMMIT_EPOCH))
-                            LT_MINUTES=$(awk -v s="$LT_SECONDS" 'BEGIN { printf "%.2f", s/60 }')
-                            WINDOW_START=$(date -d "$DORA_WINDOW_DAYS days ago" +%s)
+                    def ltSeconds = deployEnd - commitTime
+                    def ltMinutes = ltSeconds / 60.0
 
-                            mkdir -p "$(dirname "$DORA_LOG")"
+                    def deployStatus = (env.SEMGREP_STATUS == "OK") ? "SUCCESS" : "SUCCESS_WITH_ISSUES"
 
-                            if [ ! -f "$DORA_LOG" ]; then
-                                echo "build_number,commit,commit_epoch,deploy_epoch,lt_seconds,status,semgrep_status" > "$DORA_LOG"
-                            fi
+                    sh """
+                        mkdir -p \$(dirname "$DORA_LOG")
 
-                            if [ "$SEMGREP_STATUS" = "OK" ]; then
-                                DEPLOY_STATUS="SUCCESS"
-                            else
-                                DEPLOY_STATUS="SUCCESS_WITH_ISSUES"
-                            fi
+                        if [ ! -f "$DORA_LOG" ]; then
+                          echo "build,commit,commit_epoch,deploy_epoch,lt,status,semgrep" > "$DORA_LOG"
+                        fi
 
-                            printf '%s,%s,%s,%s,%s,%s,%s\n' \
-                                "$BUILD_NUMBER" \
-                                "$GIT_COMMIT_SHORT" \
-                                "$GIT_COMMIT_EPOCH" \
-                                "$DEPLOY_EPOCH" \
-                                "$LT_SECONDS" \
-                                "$DEPLOY_STATUS" \
-                                "$SEMGREP_STATUS" >> "$DORA_LOG"
+                        printf '%s,%s,%s,%s,%s,%s,%s\\n' \
+                        '${env.BUILD_NUMBER}' \
+                        '${env.GIT_COMMIT_SHORT}' \
+                        '${env.GIT_COMMIT_EPOCH}' \
+                        '${deployEnd}' \
+                        '${ltSeconds}' \
+                        '${deployStatus}' \
+                        '${env.SEMGREP_STATUS}' >> "$DORA_LOG"
+                    """
 
-                            DEPLOY_COUNT=$(awk -F',' -v ws="$WINDOW_START" '
-                                NR > 1 && $4 >= ws && $6 ~ /^SUCCESS/ { c++ }
-                                END { print c+0 }
-                            ' "$DORA_LOG")
-
-                            DF_PER_DAY=$(awk -v c="$DEPLOY_COUNT" -v d="$DORA_WINDOW_DAYS" 'BEGIN { printf "%.4f", c/d }')
-
-                            echo "$LT_SECONDS|$LT_MINUTES|$DEPLOY_COUNT|$DF_PER_DAY"
-                        '''
-                    ).trim()
-
-                    def parts = result.split(/\|/)
-                    env.DORA_LT_SECONDS = parts[0]
-                    env.DORA_LT_MINUTES = parts[1]
-                    env.DORA_DF_COUNT = parts[2]
-                    env.DORA_DF_PER_DAY = parts[3]
-
-                    writeFile file: 'dora-metrics.json', text: groovy.json.JsonOutput.prettyPrint(
-                        groovy.json.JsonOutput.toJson([
-                            buildNumber: env.BUILD_NUMBER,
-                            commit: env.GIT_COMMIT_SHORT,
-                            leadTimeSeconds: env.DORA_LT_SECONDS,
-                            leadTimeMinutes: env.DORA_LT_MINUTES,
-                            deployCountLast30Days: env.DORA_DF_COUNT,
-                            deployFrequencyPerDay: env.DORA_DF_PER_DAY,
-                            semgrepStatus: env.SEMGREP_STATUS
-                        ])
-                    )
-
-                    archiveArtifacts artifacts: 'dora-metrics.json', fingerprint: true
-                    currentBuild.description = "LT=${env.DORA_LT_MINUTES}m | DF30=${env.DORA_DF_COUNT} | Semgrep=${env.SEMGREP_STATUS}"
+                    currentBuild.description = "LT=${ltMinutes}m | Semgrep=${env.SEMGREP_STATUS}"
                 }
             }
         }
@@ -178,22 +135,14 @@ stage('Semgrep Analysis') {
 
     post {
         success {
-            echo "=============================="
+            echo "======================="
             echo "PIPELINE SUCCESS"
-            echo "=============================="
-            echo "DORA FINAL RESULT:"
-            echo "Lead Time (LT): ${env.DORA_LT_SECONDS} detik (${env.DORA_LT_MINUTES} menit)"
-            echo "Deployment Frequency (DF): ${env.DORA_DF_COUNT} deploy dalam ${env.DORA_WINDOW_DAYS} hari"
-            echo "DF Rate: ${env.DORA_DF_PER_DAY} deploy/hari"
+            echo "======================="
             echo "Semgrep: ${env.SEMGREP_STATUS}"
         }
 
         failure {
             echo "PIPELINE FAILED"
-        }
-
-        always {
-            echo "Build status: ${currentBuild.currentResult}"
         }
     }
 }
