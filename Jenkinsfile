@@ -31,7 +31,7 @@ pipeline {
         stage('Prepare Workspace') {
             steps {
                 sh '''
-                    rm -rf build semgrep-report.json dora-metrics.json dora.env
+                    rm -rf build semgrep-report.json dora-metrics.json dora.env semgrep-status.txt
                 '''
             }
         }
@@ -39,15 +39,14 @@ pipeline {
         stage('Semgrep Analysis') {
             steps {
                 script {
-                    if (!fileExists(env.SEMGREP_BIN)) {
-                        error "Semgrep binary not found at ${env.SEMGREP_BIN}. Pastikan venv Semgrep sudah dibuat dan path-nya benar."
-                    }
+                    sh '''
+                        test -x "$SEMGREP_BIN"
+                    '''
 
                     def semgrepExit = sh(
                         returnStatus: true,
                         script: '''
                             set +e
-
                             "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json .
                             exit_code=$?
 
