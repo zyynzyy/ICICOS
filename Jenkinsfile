@@ -10,6 +10,7 @@ pipeline {
         APP_DIR = '/var/www/dora-site'
         DORA_LOG = '/var/lib/jenkins/dora-metrics/deployments.csv'
         DORA_WINDOW_DAYS = '30'
+        SEMGREP_BIN = '/var/lib/jenkins/semgrep-venv/bin/semgrep'
         SEMGREP_STATUS = 'UNKNOWN'
     }
 
@@ -38,18 +39,16 @@ pipeline {
         stage('Semgrep Analysis') {
             steps {
                 script {
+                    if (!fileExists(env.SEMGREP_BIN)) {
+                        error "Semgrep binary not found at ${env.SEMGREP_BIN}. Pastikan venv Semgrep sudah dibuat dan path-nya benar."
+                    }
+
                     def semgrepExit = sh(
                         returnStatus: true,
                         script: '''
                             set +e
 
-                            if ! command -v semgrep >/dev/null 2>&1; then
-                                python3 -m pip install --user semgrep
-                            fi
-
-                            export PATH="$HOME/.local/bin:$PATH"
-
-                            semgrep scan --config=auto --error --json-output=semgrep-report.json .
+                            "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json .
                             exit_code=$?
 
                             if [ $exit_code -eq 0 ]; then
