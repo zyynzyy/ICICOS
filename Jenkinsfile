@@ -36,43 +36,39 @@ pipeline {
             }
         }
 
-        stage('Semgrep Analysis') {
-            steps {
-                script {
-                    sh '''
-                        test -x "$SEMGREP_BIN"
-                    '''
+stage('Semgrep Analysis') {
+    steps {
+        script {
+            sh 'test -x "$SEMGREP_BIN"'
 
-                    def semgrepExit = sh(
-                        returnStatus: true,
-                        script: '''
-                            set +e
-                            "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json .
-                            exit_code=$?
+            def semgrepStatus = sh(
+                returnStdout: true,
+                script: '''
+                    set +e
+                    "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json .
+                    exit_code=$?
 
-                            if [ $exit_code -eq 0 ]; then
-                                echo OK > semgrep-status.txt
-                            elif [ $exit_code -eq 1 ]; then
-                                echo ISSUES > semgrep-status.txt
-                            else
-                                echo FAILED > semgrep-status.txt
-                            fi
+                    if [ $exit_code -eq 0 ]; then
+                        echo OK
+                    elif [ $exit_code -eq 1 ]; then
+                        echo ISSUES
+                    else
+                        echo FAILED
+                    fi
+                '''
+            ).trim()
 
-                            exit $exit_code
-                        '''
-                    )
-
-                    if (semgrepExit == 0 || semgrepExit == 1) {
-                        env.SEMGREP_STATUS = readFile('semgrep-status.txt').trim()
-                    } else {
-                        error "Semgrep failed with exit code ${semgrepExit}"
-                    }
-
-                    archiveArtifacts artifacts: 'semgrep-report.json,semgrep-status.txt', fingerprint: true
-                    echo "Semgrep status: ${env.SEMGREP_STATUS}"
-                }
+            if (semgrepStatus == 'FAILED') {
+                error "Semgrep failed"
             }
+
+            env.SEMGREP_STATUS = semgrepStatus
+
+            archiveArtifacts artifacts: 'semgrep-report.json', fingerprint: true
+            echo "Semgrep status: ${env.SEMGREP_STATUS}"
         }
+    }
+}
 
         stage('Build') {
             steps {
