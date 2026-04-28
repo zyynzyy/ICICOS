@@ -14,7 +14,6 @@ pipeline {
     }
 
     stages {
-
         stage('Capture Source Info') {
             steps {
                 script {
@@ -31,7 +30,7 @@ pipeline {
         stage('Prepare Workspace') {
             steps {
                 sh '''
-                    rm -rf build semgrep-report.json dora-metrics.json
+                    rm -rf build semgrep-report.json dora-metrics.json dora.env
                 '''
             }
         }
@@ -42,7 +41,7 @@ pipeline {
                     def semgrepExit = sh(
                         returnStatus: true,
                         script: '''
-                            set -e
+                            set +e
 
                             if ! command -v semgrep >/dev/null 2>&1; then
                                 python3 -m pip install --user semgrep
@@ -51,6 +50,17 @@ pipeline {
                             export PATH="$HOME/.local/bin:$PATH"
 
                             semgrep scan --config=auto --error --json-output=semgrep-report.json .
+                            exit_code=$?
+
+                            if [ $exit_code -eq 0 ]; then
+                                echo OK > semgrep-status.txt
+                            elif [ $exit_code -eq 1 ]; then
+                                echo ISSUES > semgrep-status.txt
+                            else
+                                echo FAILED > semgrep-status.txt
+                            fi
+
+                            exit $exit_code
                         '''
                     )
 
@@ -93,14 +103,13 @@ pipeline {
         stage('DORA Metrics') {
             steps {
                 script {
-                    def doraResult = sh(
+                    def result = sh(
                         returnStdout: true,
                         script: '''
                             set -e
 
                             DEPLOY_EPOCH=$(date +%s)
-                            COMMIT_EPOCH="$GIT_COMMIT_EPOCH"
-                            LT_SECONDS=$((DEPLOY_EPOCH - COMMIT_EPOCH))
+                            LT_SECONDS=$((DEPLOY_EPOCH - GIT_COMMIT_EPOCH))
                             LT_MINUTES=$(awk -v s="$LT_SECONDS" 'BEGIN { printf "%.2f", s/60 }')
                             WINDOW_START=$(date -d "$DORA_WINDOW_DAYS days ago" +%s)
 
@@ -119,7 +128,7 @@ pipeline {
                             printf '%s,%s,%s,%s,%s,%s,%s\n' \
                                 "$BUILD_NUMBER" \
                                 "$GIT_COMMIT_SHORT" \
-                                "$COMMIT_EPOCH" \
+                                "$GIT_COMMIT_EPOCH" \
                                 "$DEPLOY_EPOCH" \
                                 "$LT_SECONDS" \
                                 "$DEPLOY_STATUS" \
@@ -136,7 +145,7 @@ pipeline {
                         '''
                     ).trim()
 
-                    def parts = doraResult.split(/\|/)
+                    def parts = result.split(/\|/)
                     env.DORA_LT_SECONDS = parts[0]
                     env.DORA_LT_MINUTES = parts[1]
                     env.DORA_DF_COUNT = parts[2]
