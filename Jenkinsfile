@@ -31,7 +31,7 @@ pipeline {
         stage('Prepare Workspace') {
             steps {
                 sh '''
-                    rm -rf build semgrep-report.json dora-metrics.json dora.env semgrep-status.txt
+                    rm -rf build semgrep-report.json dora-metrics.json semgrep-status.txt
                 '''
             }
         }
@@ -62,15 +62,13 @@ pipeline {
                         '''
                     )
 
-                    if (semgrepExit == 0) {
-                        env.SEMGREP_STATUS = 'OK'
-                    } else if (semgrepExit == 1) {
-                        env.SEMGREP_STATUS = 'ISSUES'
+                    if (semgrepExit == 0 || semgrepExit == 1) {
+                        env.SEMGREP_STATUS = readFile('semgrep-status.txt').trim()
                     } else {
                         error "Semgrep failed with exit code ${semgrepExit}"
                     }
 
-                    archiveArtifacts artifacts: 'semgrep-report.json', fingerprint: true
+                    archiveArtifacts artifacts: 'semgrep-report.json,semgrep-status.txt', fingerprint: true
                     echo "Semgrep status: ${env.SEMGREP_STATUS}"
                 }
             }
@@ -80,21 +78,23 @@ pipeline {
             steps {
                 echo "Build static web"
                 sh '''
+                    set -e
                     rm -rf build
                     mkdir -p build
 
-                    if [ -f index.html ]; then
-                        cp index.html build/
-                    else
-                        echo "index.html not found"
-                        exit 1
-                    fi
+                    # copy file-file utama
+                    for f in index.html templates.html templatemo-quantix-style.css templatemo-quantix-script.js; do
+                        if [ -f "$f" ]; then
+                            cp "$f" build/
+                        fi
+                    done
 
-                    if [ -d assets ]; then
-                        cp -r assets build/
-                    else
-                        echo "assets folder not found, skip copying assets"
-                    fi
+                    # kalau ada folder static umum, ikut dicopy juga
+                    for d in assets images img css js fonts vendor; do
+                        if [ -d "$d" ]; then
+                            cp -r "$d" build/
+                        fi
+                    done
                 '''
             }
         }
