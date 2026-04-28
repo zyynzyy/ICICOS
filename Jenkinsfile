@@ -82,7 +82,19 @@ pipeline {
                 sh '''
                     rm -rf build
                     mkdir -p build
-                    cp -r index.html assets build/
+
+                    if [ -f index.html ]; then
+                        cp index.html build/
+                    else
+                        echo "index.html not found"
+                        exit 1
+                    fi
+
+                    if [ -d assets ]; then
+                        cp -r assets build/
+                    else
+                        echo "assets folder not found, skip copying assets"
+                    fi
                 '''
             }
         }
