@@ -70,24 +70,23 @@ pipeline {
         }
 
         stage('Build') {
-            steps {
-                echo "Build static web"
-                sh '''
-                    set -e
-                    rm -rf build
-                    mkdir -p build
+    steps {
+        echo "Build static web (generic)"
 
-                    for f in index.html templates.html templatemo-quantix-style.css templatemo-quantix-script.js; do
-                        if [ -f "$f" ]; then cp "$f" build/; fi
-                    done
+        sh '''
+            set -e
+            rm -rf build
+            mkdir -p build
 
-                    for d in assets images img css js fonts vendor; do
-                        if [ -d "$d" ]; then cp -r "$d" build/; fi
-                    done
-                '''
-            }
-        }
-
+            # copy semua file & folder kecuali hidden dan build itu sendiri
+            for item in *; do
+                if [ "$item" != "build" ]; then
+                    cp -r "$item" build/
+                fi
+            done
+        '''
+    }
+}
         stage('Deploy to Nginx') {
             steps {
                 echo "Deploy ke Nginx"
