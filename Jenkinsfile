@@ -15,52 +15,47 @@ pipeline {
     }
 
     stages {
-        stage('Capture Source Info') {
-            steps {
-                script {
-                    env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-                    env.GIT_COMMIT_EPOCH = sh(script: "git log -1 --format=%ct", returnStdout: true).trim()
-                    env.GIT_COMMIT_ISO = sh(script: "git log -1 --format=%cI", returnStdout: true).trim()
-
-                    echo "Commit: ${env.GIT_COMMIT_SHORT}"
-                    echo "Commit time: ${env.GIT_COMMIT_ISO}"
-                }
-            }
-        }
-
         stage('Prepare Workspace') {
             steps {
                 sh '''
-                    rm -rf build semgrep-report.json dora-metrics.json semgrep-status.txt
+                    rm -rf build semgrep-report.json semgrep-console.log dora-metrics.json
                 '''
             }
         }
 
-stage('Semgrep Analysis') {
-    steps {
-        script {
-            sh '''
-                set +e
-                "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json .
-                echo $? > semgrep_exit_code.txt
-            '''
+        stage('Semgrep Analysis') {
+            steps {
+                script {
+                    sh 'test -x "$SEMGREP_BIN"'
 
-            def exitCode = readFile('semgrep_exit_code.txt').trim()
+                    def semgrepStatus = sh(
+                        returnStdout: true,
+                        script: '''
+                            set +e
+                            "$SEMGREP_BIN" scan --config=auto --error --json-output=semgrep-report.json . > semgrep-console.log 2>&1
+                            code=$?
 
-            if (exitCode == '0') {
-                env.SEMGREP_STATUS = 'OK'
-            } else if (exitCode == '1') {
-                env.SEMGREP_STATUS = 'ISSUES'
-            } else {
-                error "Semgrep error (exit code ${exitCode})"
+                            if [ $code -eq 0 ]; then
+                                printf OK
+                            elif [ $code -eq 1 ]; then
+                                printf ISSUES
+                            else
+                                printf FAILED
+                            fi
+                        '''
+                    ).trim()
+
+                    if (semgrepStatus == 'FAILED') {
+                        error "Semgrep error"
+                    }
+
+                    env.SEMGREP_STATUS = semgrepStatus
+
+                    archiveArtifacts artifacts: 'semgrep-report.json,semgrep-console.log', fingerprint: true
+                    echo "Semgrep status FINAL: ${env.SEMGREP_STATUS}"
+                }
             }
-
-            archiveArtifacts artifacts: 'semgrep-report.json', fingerprint: true
-
-            echo "Semgrep status FINAL: ${env.SEMGREP_STATUS}"
         }
-    }
-}
 
         stage('Build') {
             steps {
@@ -70,14 +65,12 @@ stage('Semgrep Analysis') {
                     rm -rf build
                     mkdir -p build
 
-                    # copy file-file utama
                     for f in index.html templates.html templatemo-quantix-style.css templatemo-quantix-script.js; do
                         if [ -f "$f" ]; then
                             cp "$f" build/
                         fi
                     done
 
-                    # kalau ada folder static umum, ikut dicopy juga
                     for d in assets images img css js fonts vendor; do
                         if [ -d "$d" ]; then
                             cp -r "$d" build/
@@ -109,7 +102,6 @@ stage('Semgrep Analysis') {
                             DEPLOY_EPOCH=$(date +%s)
                             LT_SECONDS=$((DEPLOY_EPOCH - GIT_COMMIT_EPOCH))
                             LT_MINUTES=$(awk -v s="$LT_SECONDS" 'BEGIN { printf "%.2f", s/60 }')
-                            WINDOW_START=$(date -d "$DORA_WINDOW_DAYS days ago" +%s)
 
                             mkdir -p "$(dirname "$DORA_LOG")"
 
@@ -132,12 +124,9 @@ stage('Semgrep Analysis') {
                                 "$DEPLOY_STATUS" \
                                 "$SEMGREP_STATUS" >> "$DORA_LOG"
 
-                            DEPLOY_COUNT=$(awk -F',' -v ws="$WINDOW_START" '
-                                NR > 1 && $4 >= ws && $6 ~ /^SUCCESS/ { c++ }
-                                END { print c+0 }
-                            ' "$DORA_LOG")
-
-                            DF_PER_DAY=$(awk -v c="$DEPLOY_COUNT" -v d="$DORA_WINDOW_DAYS" 'BEGIN { printf "%.4f", c/d }')
+                            # DF dibuat baseline 0 sesuai permintaan
+                            DEPLOY_COUNT=0
+                            DF_PER_DAY=0.0000
 
                             echo "$LT_SECONDS|$LT_MINUTES|$DEPLOY_COUNT|$DF_PER_DAY"
                         '''
