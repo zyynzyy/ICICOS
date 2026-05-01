@@ -94,43 +94,42 @@ pipeline {
         stage('DORA Metrics') {
             steps {
                 script {
-                    def result = sh(
-                        returnStdout: true,
-                        script: '''
-                            set -e
+def result = sh(
+    returnStdout: true,
+    script: '''
+        set -e
 
-                            DEPLOY_EPOCH=$(date +%s)
-                            LT_SECONDS=$((DEPLOY_EPOCH - GIT_COMMIT_EPOCH))
-                            LT_MINUTES=$(awk -v s="$LT_SECONDS" 'BEGIN { printf "%.2f", s/60 }')
+        DEPLOY_EPOCH=$(date +%s)
 
-                            mkdir -p "$(dirname "$DORA_LOG")"
+        # FIX DI SINI
+        LT_SECONDS=$((DEPLOY_EPOCH - $GIT_COMMIT_EPOCH))
 
-                            if [ ! -f "$DORA_LOG" ]; then
-                                echo "build_number,commit,commit_epoch,deploy_epoch,lt_seconds,status,semgrep_status" > "$DORA_LOG"
-                            fi
+        LT_MINUTES=$(awk -v s="$LT_SECONDS" 'BEGIN { printf "%.2f", s/60 }')
 
-                            if [ "$SEMGREP_STATUS" = "OK" ]; then
-                                DEPLOY_STATUS="SUCCESS"
-                            else
-                                DEPLOY_STATUS="SUCCESS_WITH_ISSUES"
-                            fi
+        mkdir -p "$(dirname "$DORA_LOG")"
 
-                            printf '%s,%s,%s,%s,%s,%s,%s\n' \
-                                "$BUILD_NUMBER" \
-                                "$GIT_COMMIT_SHORT" \
-                                "$GIT_COMMIT_EPOCH" \
-                                "$DEPLOY_EPOCH" \
-                                "$LT_SECONDS" \
-                                "$DEPLOY_STATUS" \
-                                "$SEMGREP_STATUS" >> "$DORA_LOG"
+        if [ ! -f "$DORA_LOG" ]; then
+            echo "build_number,commit,commit_epoch,deploy_epoch,lt_seconds,status,semgrep_status" > "$DORA_LOG"
+        fi
 
-                            # DF dibuat baseline 0 sesuai permintaan
-                            DEPLOY_COUNT=0
-                            DF_PER_DAY=0.0000
+        if [ "$SEMGREP_STATUS" = "OK" ]; then
+            DEPLOY_STATUS="SUCCESS"
+        else
+            DEPLOY_STATUS="SUCCESS_WITH_ISSUES"
+        fi
 
-                            echo "$LT_SECONDS|$LT_MINUTES|$DEPLOY_COUNT|$DF_PER_DAY"
-                        '''
-                    ).trim()
+        printf '%s,%s,%s,%s,%s,%s,%s\n' \
+            "$BUILD_NUMBER" \
+            "$GIT_COMMIT_SHORT" \
+            "$GIT_COMMIT_EPOCH" \
+            "$DEPLOY_EPOCH" \
+            "$LT_SECONDS" \
+            "$DEPLOY_STATUS" \
+            "$SEMGREP_STATUS" >> "$DORA_LOG"
+
+        echo "$LT_SECONDS|$LT_MINUTES|0|0.0000"
+    '''
+).trim()
 
                     def parts = result.split(/\|/)
                     env.DORA_LT_SECONDS = parts[0]
