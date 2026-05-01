@@ -11,39 +11,32 @@ pipeline {
         DORA_LOG         = '/var/lib/jenkins/dora-metrics/deployments.csv'
         DORA_WINDOW_DAYS = '30'
         SEMGREP_BIN      = '/var/lib/jenkins/semgrep-venv/bin/semgrep'
-
-        // Akan di-populate di stage 'Init Git Info'
-        GIT_COMMIT_SHORT = ''
-        GIT_COMMIT_EPOCH = ''
-
-        // Diisi oleh stage Semgrep — nilai awal sengaja dikosongkan,
-        // bukan 'UNKNOWN', supaya mudah deteksi kalau stage-nya skip
-        SEMGREP_STATUS   = ''
     }
 
     stages {
 
-        // ----------------------------------------------------------------
-        // Stage 0 – ambil info Git sekali, simpan di env supaya semua
-        //           stage berikutnya bisa pakai tanpa hitung ulang
-        // ----------------------------------------------------------------
         stage('Init Git Info') {
             steps {
                 script {
-                    // GIT_COMMIT sudah disediakan Jenkins secara otomatis
-                    env.GIT_COMMIT_SHORT = sh(
+                    def shortSha = sh(
                         returnStdout: true,
                         script: 'git rev-parse --short HEAD'
                     ).trim()
 
-                    // Unix-epoch dari commit terakhir
-                    env.GIT_COMMIT_EPOCH = sh(
+                    def commitEpoch = sh(
                         returnStdout: true,
                         script: 'git log -1 --format=%ct HEAD'
                     ).trim()
 
+                    env.GIT_COMMIT_SHORT = shortSha
+                    env.GIT_COMMIT_EPOCH = commitEpoch
+
                     echo "Commit : ${env.GIT_COMMIT_SHORT}"
                     echo "Epoch  : ${env.GIT_COMMIT_EPOCH}"
+
+                    if (!env.GIT_COMMIT_SHORT || !env.GIT_COMMIT_EPOCH) {
+                        error 'Gagal membaca info Git — periksa apakah repo sudah di-checkout.'
+                    }
                 }
             }
         }
@@ -54,21 +47,13 @@ pipeline {
             }
         }
 
-        // ----------------------------------------------------------------
-        // Stage Semgrep
-        // Kode keluar  0  → OK   (tidak ada temuan)
-        // Kode keluar  1  → ISSUES (ada temuan, pipeline tetap lanjut)
-        // Kode keluar selain itu → FAILED (error tool) → abort
-        // ----------------------------------------------------------------
         stage('Semgrep Analysis') {
             steps {
                 script {
                     sh 'test -x "$SEMGREP_BIN"'
 
-                    // Jalankan semgrep, tangkap exit-code lewat file supaya
-                    // tidak bergantung pada pipe yang bisa menelan kode
-                    def semgrepResult = sh(
-                        returnStatus: true,          // <-- returnStatus, bukan returnStdout
+                    def exitCode = sh(
+                        returnStatus: true,
                         script: '''
                             "$SEMGREP_BIN" scan \
                                 --config=auto \
@@ -78,18 +63,21 @@ pipeline {
                         '''
                     )
 
-                    // Petakan exit-code → label
-                    if (semgrepResult == 0) {
+                    echo "Semgrep raw exit code: ${exitCode}"
+
+                    if (exitCode == 0) {
                         env.SEMGREP_STATUS = 'OK'
-                    } else if (semgrepResult == 1) {
+                    } else if (exitCode == 1) {
                         env.SEMGREP_STATUS = 'ISSUES'
                     } else {
-                        // Tool gagal (misal: config error, crash) → hentikan build
-                        error "Semgrep exited with code ${semgrepResult} — lihat semgrep-console.log"
+                        env.SEMGREP_STATUS = 'FAILED'
+                        error "Semgrep tool error (exit ${exitCode}) — lihat semgrep-console.log"
                     }
 
                     archiveArtifacts artifacts: 'semgrep-report.json,semgrep-console.log',
+                                     allowEmptyArchive: true,
                                      fingerprint: true
+
                     echo "Semgrep status: ${env.SEMGREP_STATUS}"
                 }
             }
@@ -125,37 +113,28 @@ pipeline {
             }
         }
 
-        // ----------------------------------------------------------------
-        // DORA Metrics
-        // Lead Time = waktu antara commit masuk repo s.d. deploy selesai
-        // Deployment Frequency = jumlah deploy sukses dalam 30 hari terakhir
-        // ----------------------------------------------------------------
         stage('DORA Metrics') {
             steps {
                 script {
-                    // Pastikan GIT_COMMIT_EPOCH sudah terisi
                     if (!env.GIT_COMMIT_EPOCH?.trim()) {
-                        error 'GIT_COMMIT_EPOCH kosong — pastikan stage Init Git Info berhasil'
+                        error 'GIT_COMMIT_EPOCH kosong — stage Init Git Info gagal.'
+                    }
+                    if (!env.SEMGREP_STATUS?.trim()) {
+                        error 'SEMGREP_STATUS kosong — stage Semgrep Analysis gagal.'
                     }
 
-                    def doraResult = sh(
+                    def doraOutput = sh(
                         returnStdout: true,
                         script: '''
                             set -e
 
                             DEPLOY_EPOCH=$(date +%s)
 
-                            # Lead Time dalam detik (commit → deploy)
                             LT_SECONDS=$(( DEPLOY_EPOCH - GIT_COMMIT_EPOCH ))
-
-                            # Hindari nilai negatif (clock skew / commit di masa depan)
                             [ "$LT_SECONDS" -lt 0 ] && LT_SECONDS=0
-
                             LT_MINUTES=$(awk -v s="$LT_SECONDS" 'BEGIN { printf "%.2f", s/60 }')
 
-                            # ---------- tulis ke CSV log ----------
                             mkdir -p "$(dirname "$DORA_LOG")"
-
                             if [ ! -f "$DORA_LOG" ]; then
                                 echo "build_number,commit,commit_epoch,deploy_epoch,lt_seconds,status,semgrep_status" > "$DORA_LOG"
                             fi
@@ -175,14 +154,11 @@ pipeline {
                                 "$DEPLOY_STATUS" \
                                 "$SEMGREP_STATUS" >> "$DORA_LOG"
 
-                            # ---------- hitung Deployment Frequency ----------
-                            # Hitung baris deploy SUCCESS atau SUCCESS_WITH_ISSUES
-                            # dalam window 30 hari terakhir
                             WINDOW_SECONDS=$(( DORA_WINDOW_DAYS * 86400 ))
                             CUTOFF=$(( DEPLOY_EPOCH - WINDOW_SECONDS ))
 
                             DF_COUNT=$(awk -F',' -v cutoff="$CUTOFF" '
-                                NR > 1 && $4 >= cutoff && ($6 == "SUCCESS" || $6 == "SUCCESS_WITH_ISSUES") {
+                                NR > 1 && $4+0 >= cutoff && ($6 == "SUCCESS" || $6 == "SUCCESS_WITH_ISSUES") {
                                     count++
                                 }
                                 END { print (count ? count : 0) }
@@ -191,13 +167,12 @@ pipeline {
                             DF_PER_DAY=$(awk -v c="$DF_COUNT" -v w="$DORA_WINDOW_DAYS" \
                                 'BEGIN { printf "%.4f", c/w }')
 
-                            # Kembalikan semua nilai dalam satu baris, dipisah |
                             printf '%s|%s|%s|%s' \
                                 "$LT_SECONDS" "$LT_MINUTES" "$DF_COUNT" "$DF_PER_DAY"
                         '''
                     ).trim()
 
-                    def parts = doraResult.tokenize('|')
+                    def parts = doraOutput.tokenize('|')
                     env.DORA_LT_SECONDS  = parts[0]
                     env.DORA_LT_MINUTES  = parts[1]
                     env.DORA_DF_COUNT    = parts[2]
@@ -230,17 +205,14 @@ pipeline {
             echo '=============================='
             echo 'PIPELINE SUCCESS'
             echo '=============================='
-            echo "DORA FINAL RESULT:"
             echo "Lead Time    : ${env.DORA_LT_SECONDS} detik (${env.DORA_LT_MINUTES} menit)"
             echo "Deploy count : ${env.DORA_DF_COUNT} deploy dalam ${env.DORA_WINDOW_DAYS} hari terakhir"
             echo "DF Rate      : ${env.DORA_DF_PER_DAY} deploy/hari"
             echo "Semgrep      : ${env.SEMGREP_STATUS}"
         }
-
         failure {
             echo 'PIPELINE FAILED'
         }
-
         always {
             echo "Build status: ${currentBuild.currentResult}"
         }
